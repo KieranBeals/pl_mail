@@ -1,4 +1,4 @@
-<!-- translated-from: features/appearance.md sha1:07ca79710a14017f094316936796ec53ba56ebb6 -->
+<!-- translated-from: features/appearance.md sha1:154002d7c9d4ebbdc4322a126e5b787da7586fca -->
 
 # Darstellung
 
@@ -287,8 +287,8 @@ wurde, bevor es ein bestimmtes Bedienelement gab, trotzdem irgendwo Sinnvollem l
 wird. Deine Mail bleibt genau so, wie sie geschrieben wurde — es wird nichts übersetzt und
 nichts umgeschrieben.
 
-plMail liefert **English**, **Deutsch**, **Français** und **Pirate English** mit. Eine Änderung lädt die
-Seite neu, statt sie nachzubessern, denn jede Zeichenkette auf dem Bildschirm muss neu
+plMail liefert **English**, **Deutsch**, **Français**, **简体中文** (vereinfachtes Chinesisch) und
+**Pirate English** mit. Eine Änderung lädt die Seite neu, statt sie nachzubessern, denn jede Zeichenkette auf dem Bildschirm muss neu
 gerendert werden.
 
 Derselbe Abschnitt trägt die **Zeitzone**, die über die Uhrzeiten und Daten entscheidet, die
@@ -301,8 +301,8 @@ der Mailliste, in einem Thread, auf einem Kalender-Chip, in der Agenda, an der S
 Tagesrasters —, denn eine Einstellung, die an den meisten Stellen greift und an einer nicht, liest
 sich als Fehler und nicht als Wahlmöglichkeit.
 
-Der Standard ist **Der Sprache folgen**, und darauf steht anfangs jede: Deutsch liest 14:30,
-Englisch liest 2:30 pm. Das ist ein echter Zustand und kein getarnter Wert — lässt du ihn stehen,
+Der Standard ist **Der Sprache folgen**, und darauf steht anfangs jede: Deutsch und vereinfachtes
+Chinesisch lesen 14:30, Englisch liest 2:30 pm. Das ist ein echter Zustand und kein getarnter Wert — lässt du ihn stehen,
 wandert das Format mit der Sprache mit. Wer eines von beiden ausdrücklich wählt, legt es fest,
 gleich welche Sprache später eingestellt wird.
 
