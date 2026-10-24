@@ -14,11 +14,15 @@ export default class extends Controller {
     static targets = ["note", "incomingLabel", "pop3Options"];
 
     /**
-     * The port each incoming protocol starts from. The heading is not here:
-     * it is translated, so the template hands both wordings to the heading
-     * element as data-heading-imap / data-heading-pop3.
+     * Where each incoming protocol starts: its SSL port, and the shape of a
+     * host name to hint at. The heading is not here: it is translated, so the
+     * template hands both wordings to the heading element as
+     * data-heading-imap / data-heading-pop3.
      */
-    static PORTS = { imap: "993", pop3: "995" };
+    static PROTOCOLS = {
+        imap: { port: "993", host: "imap.example.com" },
+        pop3: { port: "995", host: "pop.example.com" },
+    };
 
     connect() {
         this.presets = this._readPresets();
@@ -29,7 +33,7 @@ export default class extends Controller {
      * The incoming-protocol radio was changed.
      *
      * Three things follow, and all three are the same fact stated three ways:
-     * the section heading names the protocol, the port placeholder follows,
+     * the section heading names the protocol, the port follows,
      * and the POP3 delete option appears only where it means something.
      * Nothing already typed is cleared — switching back and forth should not
      * cost the user their host name.
@@ -45,10 +49,27 @@ export default class extends Controller {
             }
         }
 
+        const defaults = this.constructor.PROTOCOLS;
+        const chosen = defaults[protocol] ?? defaults.imap;
         const port = this._field("imapPort");
 
         if (port !== null) {
-            port.placeholder = this.constructor.PORTS[protocol] ?? this.constructor.PORTS.imap;
+            port.placeholder = chosen.port;
+
+            // A blank form arrives with 993 filled in. Still holding the
+            // other protocol's default, the port follows the switch; a port
+            // somebody typed is theirs and stays.
+            const isADefault = Object.values(defaults).some((entry) => entry.port === port.value);
+
+            if (port.value === "" || isADefault) {
+                port.value = chosen.port;
+            }
+        }
+
+        const host = this._field("imapHost");
+
+        if (host !== null) {
+            host.placeholder = chosen.host;
         }
 
         if (this.hasPop3OptionsTarget) {

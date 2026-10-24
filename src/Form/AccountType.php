@@ -228,9 +228,13 @@ class AccountType extends AbstractType
 
             $chosen = $event->getForm()->get('pop3DeleteMode')->getData();
 
-            // Unrecognised reads as Keep, which is Pop3DeleteMode's own rule
-            // and not repeated here.
-            $account->pop3DeleteMode = Pop3DeleteMode::fromSetting($chosen);
+            // The field hands back the enum case, not its string: passed to
+            // fromSetting() as it was, every save read as Keep and Delete
+            // could never be chosen. Anything else is unrecognised, and reads
+            // as Keep by Pop3DeleteMode's own rule.
+            $account->pop3DeleteMode = $chosen instanceof Pop3DeleteMode
+                ? $chosen
+                : Pop3DeleteMode::fromSetting($chosen);
         });
 
         // What the account had before the form wrote on it: `always_empty`
