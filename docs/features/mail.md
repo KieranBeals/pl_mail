@@ -832,6 +832,20 @@ you had it.
 together. A key still goes to the selection first: `e` with two rows ticked archives those two and
 leaves the conversation you are reading open.
 
+## Who a message is from
+
+A sender's name is whatever they typed, so a mail signed **PayPal** can come from anywhere. The
+part they cannot choose is their address, so an open message prints it as large and as dark as
+the name, and wraps it rather than cutting it off at the end, which is where the domain is.
+
+**Replies go to …** appears under the sender when the message's Reply-To points at a different
+organisation than its From address — the address your answer would actually go to. It is a line
+of fact, not a warning: newsletters and ticket systems answer from somewhere else all the time, and
+a warning on ordinary mail teaches you to ignore the one that matters. When plMail does think a
+name is pretending to be somebody else, it says so in a banner above the message, as before.
+
+There is no setting; this is on for everybody.
+
 ## Remote images
 
 Pictures that a message loads from the sender's servers are blocked until you ask for them: a
