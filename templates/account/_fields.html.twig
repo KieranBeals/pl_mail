@@ -60,17 +60,22 @@ genuinely needed, merge onto form.<field>.vars.attr.
    what port they start from. Two radios and no select: there are two, they
    are mutually exclusive, and the non-default one is why somebody is here. #}
 <div class="space-y-2">
-    {{ form_row(form.incomingProtocol, { label: 'account.form.protocol.label'|trans }) }}
+    {{ form_row(form.incomingProtocol, {
+        label: 'account.form.protocol.label'|trans,
+        help:  'account.form.protocol.help'|trans,
+    }) }}
 </div>
 
 <div class="border-t border-line"></div>
 
 {# ── Incoming — IMAP or POP3 ────────────────────────────────────────────
    One block, both protocols: the host, port and encryption fields are the
-   same three either way, and only their labels and defaults differ. The
-   Stimulus controller renames the heading and the host label on change. #}
+   same three either way, and only the heading and the port differ. The
+   Stimulus controller swaps both when the radio changes. #}
 <div class="space-y-3">
     <p data-settings--imap-preset-target="incomingLabel"
+       data-heading-imap="{{ 'account.form.imap.heading'|trans }}"
+       data-heading-pop3="{{ 'account.form.pop3.heading'|trans }}"
        class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
         {{ 'account.form.imap.heading'|trans }}
     </p>

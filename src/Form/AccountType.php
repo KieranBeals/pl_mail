@@ -95,10 +95,10 @@ class AccountType extends AbstractType
                 // before matching it against the choice values.
                 'empty_data'   => IncomingProtocol::Imap->value,
                 'label'        => 'account.form.protocol.label',
+                'help'         => 'account.form.protocol.help',
                 'attr'         => [
-                    'class'                             => 'form-radio-group',
-                    'data-settings--imap-preset-target' => 'protocol',
-                    'data-action'                       => 'change->settings--imap-preset#protocolChanged',
+                    'class'       => 'form-radio-group',
+                    'data-action' => 'change->settings--imap-preset#protocolChanged',
                 ],
             ])
             ->add('pop3DeleteMode', ChoiceType::class, [
@@ -106,13 +106,18 @@ class AccountType extends AbstractType
                 // an IMAP one. Kept on the form either way so a submitted form
                 // — which includes hidden fields — round-trips without
                 // resetting a choice the user made before switching protocol.
+                // Keep first: it is the default, and the one that cannot
+                // lose mail.
                 'choices' => [
-                    'account.form.pop3.delete_on_fetch' => Pop3DeleteMode::Delete,
                     'account.form.pop3.keep_on_server'  => Pop3DeleteMode::Keep,
+                    'account.form.pop3.delete_on_fetch' => Pop3DeleteMode::Delete,
                 ],
                 'choice_value' => static fn (?Pop3DeleteMode $mode): string => $mode->value ?? '',
                 'mapped'       => false,
-                'required'     => false,
+                // Required, so no empty option is drawn above the two; a form
+                // submitted without the field reads as Keep.
+                'required'     => true,
+                'empty_data'   => Pop3DeleteMode::Keep->value,
                 'label'        => 'account.form.pop3.delete_label',
                 'help'         => 'account.form.pop3.delete_help',
                 'attr'         => ['class' => 'form-select'],
@@ -127,14 +132,12 @@ class AccountType extends AbstractType
             ])
             ->add('imapPort', IntegerType::class, [
                 'attr' => [
-                    // Both ports, because the placeholder has to say the same
-                    // thing whichever protocol is chosen; the Stimulus
-                    // controller swaps it when the radio changes. A POP3
-                    // server that wants 110 is typed in, not offered.
-                    'placeholder' => '993 / 995',
+                    // IMAP's; the Stimulus controller swaps in 995 when POP3
+                    // is chosen. A POP3 server that wants 110 is typed in.
+                    'placeholder' => '993',
                     'class'       => 'form-input',
                 ],
-                'label' => 'account.form.imap.port',
+                'label' => 'account.form.port',
                 'constraints' => [new NotBlank(), new Range(min: 1, max: 65535)],
             ])
             ->add('imapEncryption', ChoiceType::class, [

@@ -7,7 +7,7 @@ namespace App\Domain\Enum\Account;
 /**
  * What a POP3 sync does with a message once it is safely stored here.
  *
- * Three answers, and the default is the one that cannot lose mail. A POP3
+ * Two answers, and the default is the one that cannot lose mail. A POP3
  * server has one mailbox and no concept of a folder: there is nowhere for a
  * message to go, so "keep it" leaves it exactly where it is and a later sync
  * sees it again, recognises it by its UIDL, and skips it. Nothing is read
@@ -31,18 +31,13 @@ enum Pop3DeleteMode: string
     case Keep = 'keep';
 
     /**
-     * Delete after a successful store — RETR's implicit delete, done
-     * explicitly so it is not left to a client's interpretation.
+     * Delete from the server once the message is stored here: the row
+     * committed, or — after a protocol switch — recognised as one the account
+     * already held.
      */
     case Delete = 'delete';
 
-    /**
-     * Delete once the message has been seen here AND its transaction
-     * committed, which is what "Delete" does. Named separately because the
-     * setting is read by a person, and "delete after fetch" is the sentence
-     * that describes it; the enum keeps both spellings apart so a future
-     * "delete when read in the UI" is not mistaken for this one.
-     */
+    /** Whether this mode removes anything from the server. */
     public function deletes(): bool
     {
         return self::Delete === $this;

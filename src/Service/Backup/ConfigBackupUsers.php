@@ -280,8 +280,9 @@ final readonly class ConfigBackupUsers
         // would leave a mailbox growing on a server that was being pruned.
         // Getting it wrong the other way — carrying Delete to a host that
         // has never fetched — is harmless: nothing is marked until a message
-        // has been stored, and a host with an empty ledger stores before it
-        // deletes.
+        // has been stored on that host. The UIDL ledger itself is a table
+        // (pop3_uidl) and is not part of the backup, so the target fetches
+        // everything before it deletes anything.
         Account::SETTING_POP3_DELETE_MODE,
     ];
 
@@ -321,15 +322,7 @@ final readonly class ConfigBackupUsers
         Account::SETTING_GRAPH_IMPORT => 'the folders the OTHER host had still to read, by ids and page links that mean nothing to a mailbox connected afresh; the target plans its own on its first sync',
         Account::SETTING_GRAPH_REMOVALS => 'message ids the other host was waiting to judge, for rows this host does not have',
         Account::SETTING_IMPORT_TOTAL => 'the size of the mailbox as the other host found it, for a progress line about an import that is not this one',
-        // The one where carrying it would do real damage rather than untidy
-        // bookkeeping: this is the list of messages the OTHER host has
-        // already stored. Restored onto an empty installation it would tell
-        // the sync every message in the mailbox is already here, so nothing
-        // would ever be fetched and the mailbox would come up empty and stay
-        // empty. The target starts its own ledger from its first sync, which
-        // fetches everything — the correct answer for a host that has none of
-        // the mail.
-        Account::SETTING_POP3_SEEN_UIDLS => 'the UIDLs the OTHER host has already stored; carried, a restored installation would believe it holds mail it has never fetched and the mailbox would stay empty',
+        Account::SETTING_POP3_ADOPTING => 'a pass over the OTHER host\'s POP3 mailbox that had still to finish; the target keeps no UIDLs from the file and fetches the mailbox afresh',
     ];
 
     public function __construct(

@@ -6,6 +6,7 @@ namespace App\Tests\Infrastructure\Pop3;
 
 use App\Infrastructure\Pop3\Pop3Connection;
 use App\Infrastructure\Pop3\Pop3Exception;
+use App\Infrastructure\Pop3\Pop3RefusedException;
 use App\Service\Imap\ImapDeadline;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -34,6 +35,8 @@ final class Pop3ConnectionTest extends TestCase
 
     protected function tearDown(): void
     {
+        $verdict = $this->collectChild();
+
         foreach ($this->peers as $peer) {
             if (true === is_resource($peer)) {
                 fclose($peer);
@@ -44,9 +47,22 @@ final class Pop3ConnectionTest extends TestCase
             fclose($this->listener);
         }
 
-        $this->listener = null;
-        $this->peers    = [];
-        $this->child    = null;
+        foreach (['', '.ready', '.status'] as $suffix) {
+            if ('' !== $this->transcript && true === is_file($this->transcript . $suffix)) {
+                unlink($this->transcript . $suffix);
+            }
+        }
+
+        $this->listener   = null;
+        $this->peers      = [];
+        $this->transcript = '';
+
+        // The server's own verdict on what the client sent. Without it a
+        // client that sent the wrong command only failed when the hang-up
+        // that followed happened to surface as an exception.
+        if (null !== $verdict && 'OK' !== $verdict) {
+            self::fail('The scripted server saw the wrong conversation: ' . $verdict);
+        }
     }
 
     public function testItLogsInAndListsWhatTheServerHolds(): void
@@ -164,6 +180,42 @@ final class Pop3ConnectionTest extends TestCase
     }
 
     /**
+     * TOP n 0 brings the header block alone, framed like RETR, and a server
+     * that does not offer it says so with -ERR — which the syncer reads as
+     * "use RETR instead", so it has to be the refusal and not a hang-up.
+     */
+    public function testTopReturnsTheHeadersAndARefusalIsARefusal(): void
+    {
+        $this->serve(static function (array $server): void {
+            $server['expect']('USER someone@example.com');
+            $server['send']("+OK\r\n");
+            $server['expect']('PASS secret');
+            $server['send']("+OK\r\n");
+
+            $server['expect']('TOP 1 0');
+            $server['send']("+OK\r\nMessage-ID: <a@b>\r\n..dotted: header\r\n\r\n.\r\n");
+
+            $server['expect']('TOP 2 0');
+            $server['send']("-ERR TOP not supported\r\n");
+
+            $server['expect']('QUIT');
+            $server['send']("+OK bye\r\n");
+        });
+
+        $connection = $this->connect();
+
+        self::assertSame("Message-ID: <a@b>\r\n.dotted: header\r\n\r\n", $connection->top(1));
+
+        try {
+            $connection->top(2);
+            self::fail('a refused TOP must throw');
+        } catch (Pop3RefusedException) {
+        }
+
+        $connection->quit();
+    }
+
+    /**
      * A DELE is not a deletion until QUIT — and abort() is the way to make sure
      * it never becomes one.
      *
@@ -199,11 +251,11 @@ final class Pop3ConnectionTest extends TestCase
 
     public function testAGreetingThatIsNotOkIsAnError(): void
     {
-        $this->serve(static function (array $server): void {
-            $server['send']("-ERR service unavailable\r\n");
-        });
+        $this->serve(static function (): void {
+        }, greeting: "-ERR service unavailable\r\n");
 
         $this->expectException(Pop3Exception::class);
+        $this->expectExceptionMessageMatches('/did not greet us/');
 
         $this->connect();
     }
@@ -267,10 +319,19 @@ final class Pop3ConnectionTest extends TestCase
      * here, and a forked server is exactly the shape the client sees: a peer
      * on the other end of a socket that answers when it is asked.
      *
-     * @param callable(array{expect: callable, send: callable}): void $script
+     * The child never returns into PHPUnit. It writes its verdict to a file
+     * and kills itself: exit() would run the shutdown handlers and destructors
+     * it inherited from the parent — PHPUnit's own among them, and anything
+     * holding a database connection the parent is still using.
+     *
+     * @param callable(array{expect: callable(string): void, send: callable(string): void}): void $script
      */
-    private function serve(callable $script): void
+    private function serve(callable $script, string $greeting = "+OK pop3.test ready\r\n"): void
     {
+        if (false === function_exists('pcntl_fork') || false === function_exists('posix_kill')) {
+            self::markTestSkipped('needs pcntl and posix to run a scripted server');
+        }
+
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
 
         if (false === $listener) {
@@ -287,12 +348,6 @@ final class Pop3ConnectionTest extends TestCase
             self::fail('Could not create a transcript file for the scripted server.');
         }
 
-        register_shutdown_function(function (): void {
-            if ('' !== $this->transcript && true === is_file($this->transcript)) {
-                @unlink($this->transcript);
-            }
-        });
-
         $name = stream_socket_get_name($listener, false);
         self::assertIsString($name);
 
@@ -300,102 +355,99 @@ final class Pop3ConnectionTest extends TestCase
         // and a CI box with something on 110 are both fine.
         $this->port = (int) substr($name, strrpos($name, ':') + 1);
 
-        $pid = pcntl_fork();
-
+        $transcript = $this->transcript;
+        $pid        = pcntl_fork();
 
         if (-1 === $pid) {
-            self::markTestSkipped('needs pcntl to run a scripted server');
+            self::markTestSkipped('could not fork a scripted server');
         }
 
         if (0 === $pid) {
-            // Child. Its peer connection is closed by exit; the listener is
-            // inherited and closed on the way out too.
-
-            // Ready means "about to accept", which is before the blocking
-            // call. Telling the parent from inside accept() would be a
-            // deadlock: the client cannot connect until the parent returns
-            // from serve(), and accept() cannot return until it does.
-            touch($this->transcript . '.ready');
-
-            $peer = @stream_socket_accept($listener, 10);
-
-
-            if (false === $peer) {
-                exit(1);
-            }
-
-            // The parent cannot see this process's memory, so what the client
-            // sent is reported through a file. Appended one line at a time,
-            // before the answer is written, so a test that reads the file after
-            // the client has finished sees every command even for a session
-            // the client abandoned.
-            $log = fopen($this->transcript, 'ab');
-
-            $server = [
-                'expect' => static function (string $line) use ($peer, $log): void {
-                    $answer = fgets($peer);
-
-                    if (false === $answer) {
-                        exit(2);
-                    }
-
-                    $got = rtrim($answer, "\r\n");
-
-                    fwrite($log, $got . "\n");
-                    fflush($log);
-
-                    if ($got !== $line) {
-                        exit(3);
-                    }
-                },
-                'send' => static function (string $data) use ($peer): void {
-                    fwrite($peer, $data);
-                },
-            ];
-
-            fwrite($peer, "+OK pop3.test ready\r\n");
+            $verdict = 'OK';
 
             try {
+                // Ready means "about to accept", which is before the blocking
+                // call: telling the parent from inside accept() would be a
+                // deadlock.
+                touch($transcript . '.ready');
+
+                $peer = @stream_socket_accept($listener, 10);
+
+                if (false === $peer) {
+                    throw new \RuntimeException('the client never connected');
+                }
+
+                // The parent cannot see this process's memory, so what the
+                // client sent is reported through a file, a line at a time and
+                // before the answer, so even an abandoned session is complete.
+                $log = fopen($transcript, 'ab');
+
+                $server = [
+                    'expect' => static function (string $line) use ($peer, $log): void {
+                        $answer = fgets($peer);
+
+                        if (false === $answer) {
+                            throw new \RuntimeException(sprintf('expected "%s", the client hung up', $line));
+                        }
+
+                        $got = rtrim($answer, "\r\n");
+
+                        fwrite($log, $got . "\n");
+                        fflush($log);
+
+                        if ($got !== $line) {
+                            throw new \RuntimeException(sprintf('expected "%s", got "%s"', $line, $got));
+                        }
+                    },
+                    'send' => static function (string $data) use ($peer): void {
+                        fwrite($peer, $data);
+                    },
+                ];
+
+                fwrite($peer, $greeting);
+
                 $script($server);
-            } catch (\Throwable $e) {
-                fwrite(STDERR, "CHILD script threw: " . $e->getMessage() . "\n");
+
+                fclose($peer);
+                fclose($log);
+            } catch (\Throwable $failure) {
+                $verdict = $failure->getMessage();
             }
 
+            file_put_contents($transcript . '.status', $verdict);
 
-            fclose($peer);
-            fclose($log);
-            fclose($listener);
-
-            exit(0);
+            posix_kill(posix_getpid(), SIGKILL);
         }
 
         $this->child = $pid;
 
-        // Wait until the child is inside accept(). Without this the parent can
-        // connect, send nothing, and the child's inherited copy of the
-        // listener is what answers — or, worse, accept() has not been reached
-        // yet and the client's connect lands in the backlog until it does.
-        // The child appends a byte to a second file the moment it is ready.
-        $readyFile = $this->transcript . '.ready';
-        $waited    = 0.0;
+        // Wait until the child is inside accept(); before that the client's
+        // connect would land in the backlog of a listener nobody reads.
+        $waited = 0.0;
 
-        while (false === is_file($readyFile) && $waited < 5.0) {
+        while (false === is_file($transcript . '.ready') && $waited < 5.0) {
             usleep(20_000);
             $waited += 0.02;
         }
+    }
 
-        @unlink($readyFile);
+    /**
+     * Reap the child and read its verdict: 'OK', what went wrong, or null
+     * when no server ran.
+     */
+    private function collectChild(): ?string
+    {
+        if (null === $this->child) {
+            return null;
+        }
 
-        register_shutdown_function(function (): void {
-            // The script ends the child itself when the client quits; this is
-            // the belt for a test that fails before then.
-            if (null !== $this->child) {
-                $status = 0;
+        $status = 0;
+        pcntl_waitpid($this->child, $status);
+        $this->child = null;
 
-                pcntl_waitpid($this->child, $status, WNOHANG);
-                $this->child = null;
-            }
-        });
+        $file = $this->transcript . '.status';
+
+        return true === is_file($file) ? (string) file_get_contents($file) : 'the server died without a verdict';
     }
 
     private ?int $child = null;

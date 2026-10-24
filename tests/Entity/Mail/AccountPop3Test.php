@@ -12,12 +12,13 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * The per-account state POP3 added: which protocol, the delete mode, and the
- * ledger of UIDLs already stored.
+ * flag for the pass after a protocol switch. The UIDL ledger is a table of
+ * its own; see Pop3AccountSyncerTest.
  *
  * All three live on a plain entity with no database, which is the point — the
- * rules that matter here (what an unrecognised delete mode means, what happens
- * when the ledger fills) are the kind that silently lose mail when they are
- * wrong, and none of them need a server to state.
+ * rules that matter here (what an unrecognised delete mode means) are the kind
+ * that silently lose mail when they are wrong, and none of them need a server
+ * to state.
  */
 final class AccountPop3Test extends TestCase
 {
@@ -67,7 +68,6 @@ final class AccountPop3Test extends TestCase
      * value from a future version can all put something else there. Reading
      * that as the destructive answer is the one failure this setting must not
      * have, and it is stated here rather than being left to every caller.
-     *
      */
     #[DataProvider('unrecognisedDeleteModes')]
     public function testAnUnrecognisedDeleteModeMeansKeep(mixed $stored): void
@@ -101,105 +101,28 @@ final class AccountPop3Test extends TestCase
         self::assertSame('delete', $account->getSetting(Account::SETTING_POP3_DELETE_MODE));
     }
 
-    public function testAFreshAccountHasStoredNothing(): void
-    {
-        $account = new Account();
-
-        self::assertSame([], $account->pop3SeenUidls);
-        self::assertFalse($account->hasStoredPop3Uidl('anything'));
-    }
-
-    public function testRecordingAUidlMakesItRecognisable(): void
-    {
-        $account = new Account();
-        $account->rememberPop3Uidls(['aaa', 'bbb']);
-
-        self::assertTrue($account->hasStoredPop3Uidl('aaa'));
-        self::assertTrue($account->hasStoredPop3Uidl('bbb'));
-        self::assertFalse($account->hasStoredPop3Uidl('ccc'));
-    }
-
     /**
-     * Recording the same UIDL twice does not grow the ledger.
+     * The adoption pass is off unless a protocol switch turned it on.
      *
-     * A sync that retries a message it has already stored — the delete mark
-     * failed, say — must not spend a slot on it and push an older UIDL out.
+     * On, a repeated Message-ID is skipped as mail the account already holds;
+     * on for a new account, it would skip the second copy of a mail sent to
+     * two of the user's addresses.
      */
-    public function testRecordingTheSameUidlTwiceDoesNotDuplicateIt(): void
+    public function testANewAccountIsNotAdopting(): void
     {
-        $account = new Account();
-        $account->rememberPop3Uidls(['aaa']);
-        $account->rememberPop3Uidls(['aaa', 'bbb']);
-
-        self::assertSame(['aaa', 'bbb'], $account->pop3SeenUidls);
+        self::assertFalse((new Account())->pop3Adopting);
     }
 
-    /**
-     * The ledger keeps the newest entries when it fills.
-     *
-     * A POP3 server lists its whole mailbox every sync, so what is worth
-     * remembering is what arrived recently. Dropping from the front is what
-     * makes the cap invisible: the messages that fall out are ones the server
-     * has already stopped offering.
-     */
-    public function testTheLedgerKeepsTheNewestUidlsWhenItFills(): void
+    /** Turned off, the key leaves the bag rather than sitting there as false. */
+    public function testTheAdoptingFlagRoundTripsAndLeavesNoTrace(): void
     {
         $account = new Account();
 
-        // One over the cap, so exactly one falls off.
-        $uidls = [];
-        for ($i = 0; $i <= Account::POP3_UIDL_MEMORY; ++$i) {
-            $uidls[] = 'uidl-' . $i;
-        }
+        $account->pop3Adopting = true;
+        self::assertTrue($account->pop3Adopting);
 
-        $account->pop3SeenUidls = $uidls;
-
-        $stored = $account->pop3SeenUidls;
-
-        self::assertCount(Account::POP3_UIDL_MEMORY, $stored);
-        self::assertSame('uidl-1', $stored[0], 'the oldest went, not the newest');
-        self::assertSame('uidl-' . Account::POP3_UIDL_MEMORY, $stored[count($stored) - 1]);
-        self::assertFalse($account->hasStoredPop3Uidl('uidl-0'));
-    }
-
-    /**
-     * A ledger that is not a list of strings keeps only what is usable.
-     *
-     * The bag is jsonb and a restored or hand-edited value can be anything.
-     * The rule is per entry: strings survive, everything else is dropped, and
-     * a value that is not a list at all reads as empty. Dropping an entry
-     * costs a message fetched again; keeping a junk entry would cost the
-     * message never being fetched.
-     */
-    public function testAMalformedLedgerKeepsOnlyItsUsableEntries(): void
-    {
-        $cases = [
-            'null'              => [null, []],
-            'a bare string'     => ['uidl', []],
-            'an int'            => [42, []],
-            // A JSON object rather than a list: its string VALUES come back
-            // as the ledger. Harmless — a map was never a ledger anyone wrote
-            // — and the alternative, refusing it wholesale, would drop real
-            // UIDLs if jsonb ever re-encoded a list as an object, which it
-            // does not but which nothing should depend on.
-            'a map, not a list' => [['a' => 'b'], ['b']],
-            'mixed'             => [['ok', 7, null, ''], ['ok']],
-        ];
-
-        foreach ($cases as $label => [$junk, $expected]) {
-            $account = new Account();
-            $account->setSetting(Account::SETTING_POP3_SEEN_UIDLS, $junk);
-
-            self::assertSame($expected, $account->pop3SeenUidls, $label);
-        }
-    }
-
-    public function testRememberingNothingChangesNothing(): void
-    {
-        $account = new Account();
-        $account->pop3SeenUidls = ['aaa'];
-        $account->rememberPop3Uidls([]);
-
-        self::assertSame(['aaa'], $account->pop3SeenUidls);
+        $account->pop3Adopting = false;
+        self::assertFalse($account->pop3Adopting);
+        self::assertNull($account->getSetting(Account::SETTING_POP3_ADOPTING));
     }
 }

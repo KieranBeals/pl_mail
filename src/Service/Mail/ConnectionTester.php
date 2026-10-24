@@ -8,8 +8,7 @@ use App\Domain\DTO\ConnectionTestResult;
 use App\Domain\Helper\ImapConnectionFactory;
 use App\Domain\Helper\MailServerHost;
 use App\Entity\Mail\Account;
-use App\Infrastructure\Pop3\Pop3Connection;
-use App\Service\Imap\ImapDeadline;
+use App\Infrastructure\Pop3\Pop3ConnectionFactory;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Mailer\Transport;
 use Symfony\Component\Mailer\Transport\Smtp\SmtpTransport;
@@ -32,7 +31,7 @@ final class ConnectionTester
         private readonly SmtpDsnFactory        $dsnFactory,
         private readonly TranslatorInterface   $translator,
         private readonly LoggerInterface       $logger,
-        private readonly ImapDeadline          $deadline,
+        private readonly Pop3ConnectionFactory $pop3,
     ) {
     }
 
@@ -106,14 +105,7 @@ final class ConnectionTester
     private function probePop3(Account $account): array
     {
         try {
-            $connection = Pop3Connection::open(
-                (string) $account->imapHost,
-                (int) $account->imapPort,
-                $account->imapEncryption,
-                (string) $account->username,
-                (string) $account->password,
-                $this->deadline,
-            );
+            $connection = $this->pop3->open($account);
 
             try {
                 $count = count($connection->list());
@@ -123,11 +115,11 @@ final class ConnectionTester
 
             return [true, $this->translator->trans('account.test.result.pop3_ok', ['%count%' => $count])];
         } catch (Throwable $e) {
-            // 'imap' as the protocol argument on purpose: the categories and
-            // the port hints are keyed by which credential-bearing protocol
-            // failed, and POP3's failures are the same set — bad certificate,
-            // refused login, wrong port — read off the same field pair. A
-            // second key would be two copies of one message.
+            // 'imap' as the protocol argument on purpose: it picks the field
+            // pair the incoming server lives in (imapHost, imapPort), which a
+            // POP3 account shares, and POP3's failures are the same set — bad
+            // certificate, refused login, wrong port. The port hints know
+            // 110 and 995 as well as IMAP's pair.
             return [false, $this->describe($e, $account, 'imap', $account->imapEncryption, $account->imapPort)];
         }
     }
@@ -263,11 +255,11 @@ final class ConnectionTester
 
         $normalised = strtolower($encryption);
 
-        if ('ssl' === $normalised && in_array($port, [587, 143], true)) {
+        if ('ssl' === $normalised && in_array($port, [587, 143, 110], true)) {
             return $this->translator->trans('account.test.hint.expects_starttls', ['%port%' => $port]);
         }
 
-        if ('ssl' !== $normalised && in_array($port, [465, 993], true)) {
+        if ('ssl' !== $normalised && in_array($port, [465, 993, 995], true)) {
             return $this->translator->trans('account.test.hint.expects_ssl', ['%port%' => $port]);
         }
 

@@ -27,8 +27,8 @@ use App\Service\Imap\ImapDeadline;
  * See Pop3AccountSyncer for the handover.
  *
  * ── What is guaranteed, and what is not ──────────────────────────────────────
- * The connection is TLS for every port in the form's default list, cert
- * verification is always on (matching the IMAP side, which sets
+ * The connection is TLS unless the account's encryption is set to None,
+ * cert verification is always on (matching the IMAP side, which sets
  * validate_cert => true unconditionally — and which is why Proton Bridge's
  * self-signed certificate fails there too), and every response is checked
  * against +OK/-ERR rather than assumed.
@@ -44,7 +44,7 @@ use App\Service\Imap\ImapDeadline;
  * a sync that dies half way through deleting must not have deleted anything.
  * So this class keeps the marks and sends them only from quit().
  */
-final class Pop3Connection implements DeadlineClosable
+final class Pop3Connection implements DeadlineClosable, Pop3Session
 {
     /** How long a single read may block before it is treated as a dropped server. */
     private const int TIMEOUT_SECONDS = 60;
@@ -55,11 +55,7 @@ final class Pop3Connection implements DeadlineClosable
     /** @var array<string, true> UIDLs marked for deletion this session */
     private array $marked = [];
 
-    /**
-     * Held only until open() has watched the session with it; see the call
-     * there. Not kept afterwards: the deadline's list is weak, so a session
-     * that kept it would be keeping nothing but a reference to a service.
-     */
+    /** Only open() makes one, so every instance is a session that logged in. */
     private function __construct()
     {
     }
@@ -212,9 +208,43 @@ final class Pop3Connection implements DeadlineClosable
         $reply = $this->readLine();
 
         if (false === str_starts_with($reply, '+OK')) {
-            throw new Pop3Exception(sprintf('The server refused to send message %d: %s', $number, $reply));
+            throw new Pop3RefusedException(sprintf('The server refused to send message %d: %s', $number, $reply));
         }
 
+        return $this->readMessage();
+    }
+
+    /**
+     * The header block of one message, without its body.
+     *
+     * `TOP n 0` — the headers and no body lines. Used where all that is
+     * wanted is the Message-ID, to recognise mail the account already holds
+     * without downloading every attachment to find out. TOP is optional in
+     * RFC 1939 and a server may refuse it; the caller falls back to RETR.
+     *
+     * @throws Pop3Exception
+     */
+    public function top(int $number): string
+    {
+        $this->write('TOP ' . $number . ' 0');
+
+        $reply = $this->readLine();
+
+        if (false === str_starts_with($reply, '+OK')) {
+            throw new Pop3RefusedException(sprintf('The server refused TOP for message %d: %s', $number, $reply));
+        }
+
+        return $this->readMessage();
+    }
+
+    /**
+     * The multi-line answer to RETR or TOP, dot-unstuffed and terminator
+     * dropped.
+     *
+     * @throws Pop3Exception
+     */
+    private function readMessage(): string
+    {
         $lines = [];
 
         while (true) {
@@ -307,7 +337,7 @@ final class Pop3Connection implements DeadlineClosable
         $reply = $this->readLine();
 
         if (false === str_starts_with($reply, $expect)) {
-            throw new Pop3Exception(sprintf('The server refused %s: %s', strtok($command, ' '), $reply));
+            throw new Pop3RefusedException(sprintf('The server refused %s: %s', strtok($command, ' '), $reply));
         }
 
         $lines = [];
@@ -408,9 +438,9 @@ final class Pop3Connection implements DeadlineClosable
             $method |= STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT;
         }
 
-        // The peer name is re-stated because crypto_enable() reuses the
-        // context the socket was opened with, and the verification options
-        // travel with the context rather than the stream.
+        // No options here: stream_socket_enable_crypto() uses the context the
+        // socket was opened with, which is where dial() put verify_peer and
+        // the peer name, so STLS gets the same checks as implicit TLS.
         if (false === @stream_socket_enable_crypto($stream, true, $method)) {
             throw new Pop3Exception(sprintf('The TLS handshake with %s failed.', $host));
         }
@@ -460,7 +490,7 @@ final class Pop3Connection implements DeadlineClosable
         $reply = $this->readLine();
 
         if (false === str_starts_with($reply, $prefix)) {
-            throw new Pop3Exception(sprintf('The server did not greet us with %s: %s', $prefix, $reply));
+            throw new Pop3RefusedException(sprintf('The server did not greet us with %s: %s', $prefix, $reply));
         }
     }
 

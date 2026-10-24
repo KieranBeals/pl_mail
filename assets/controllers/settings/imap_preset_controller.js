@@ -11,20 +11,14 @@ import { Controller } from "@hotwired/stimulus";
  * the whole table is a couple of kilobytes, so no round-trip is needed.
  */
 export default class extends Controller {
-    static targets = ["note", "incomingLabel", "portHint", "pop3Options"];
+    static targets = ["note", "incomingLabel", "pop3Options"];
 
     /**
-     * What each incoming protocol calls itself in the form.
-     *
-     * The host field is one column whatever is on the other end — see
-     * Account::$imapHost — so the label is the only thing on screen that says
-     * which protocol this account is being set up for, and it has to move when
-     * the radio does.
+     * The port each incoming protocol starts from. The heading is not here:
+     * it is translated, so the template hands both wordings to the heading
+     * element as data-heading-imap / data-heading-pop3.
      */
-    static PROTOCOLS = {
-        imap: { label: "IMAP host", port: "993" },
-        pop3: { label: "POP3 host", port: "995" },
-    };
+    static PORTS = { imap: "993", pop3: "995" };
 
     connect() {
         this.presets = this._readPresets();
@@ -35,23 +29,26 @@ export default class extends Controller {
      * The incoming-protocol radio was changed.
      *
      * Three things follow, and all three are the same fact stated three ways:
-     * the host field is renamed, its port placeholder follows, and the POP3
-     * delete option appears only where it means something. Nothing already
-     * typed is cleared — switching back and forth should not cost the user
-     * their host name.
+     * the section heading names the protocol, the port placeholder follows,
+     * and the POP3 delete option appears only where it means something.
+     * Nothing already typed is cleared — switching back and forth should not
+     * cost the user their host name.
      */
     protocolChanged() {
         const protocol = this._currentProtocol();
-        const copy = this.constructor.PROTOCOLS[protocol] ?? this.constructor.PROTOCOLS.imap;
 
         if (this.hasIncomingLabelTarget) {
-            this.incomingLabelTarget.textContent = copy.label;
+            const heading = this.incomingLabelTarget.dataset[protocol === "pop3" ? "headingPop3" : "headingImap"];
+
+            if (heading) {
+                this.incomingLabelTarget.textContent = heading;
+            }
         }
 
         const port = this._field("imapPort");
 
         if (port !== null) {
-            port.placeholder = copy.port;
+            port.placeholder = this.constructor.PORTS[protocol] ?? this.constructor.PORTS.imap;
         }
 
         if (this.hasPop3OptionsTarget) {
@@ -159,6 +156,15 @@ export default class extends Controller {
     }
 
     _fill(preset) {
+        // Every preset is an IMAP server, so choosing one is choosing IMAP:
+        // its host and port would mean nothing to a POP3 session.
+        const imap = this.element.querySelector('[name$="[incomingProtocol]"][value="imap"]');
+
+        if (imap !== null && imap.checked === false) {
+            imap.checked = true;
+            this.protocolChanged();
+        }
+
         this._set("imapHost", preset.imap.host);
         this._set("imapPort", preset.imap.port);
         this._set("imapEncryption", preset.imap.encryption);

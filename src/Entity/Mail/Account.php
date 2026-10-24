@@ -526,28 +526,10 @@ class Account extends AccountModel
     public const string SETTING_POP3_DELETE_MODE = 'sync.pop3.delete_mode';
 
     /**
-     * The UIDLs this account has already stored, newest last.
-     *
-     * POP3 has no sync cursor and no folder to hold a high-water mark, so this
-     * is what a sync compares the server's UIDL list against. Only the tail is
-     * kept — see $pop3SeenUidls for the cap and the reasoning — because a
-     * message that has not been seen in the last few thousand is either gone
-     * from the server or so old the server will never offer it again.
+     * Set while a POP3 account's first pass after a protocol switch is still
+     * to finish. See $pop3Adopting.
      */
-    public const string SETTING_POP3_SEEN_UIDLS = 'sync.pop3.seen_uidls';
-
-    /**
-     * How many UIDLs $pop3SeenUidls remembers.
-     *
-     * The mailbox this exists for holds a few thousand messages, and a UIDL is
-     * about ten bytes: the whole list is tens of kilobytes of jsonb. The cap
-     * is there so an account that keeps everything on a large server does not
-     * grow a settings blob without a bound. A message older than this many
-     * syncs back is one the server has already given up offering, since a
-     * POP3 server lists its whole mailbox every time — there is no window to
-     * miss.
-     */
-    public const int POP3_UIDL_MEMORY = 5000;
+    public const string SETTING_POP3_ADOPTING = 'sync.pop3.adopting';
 
     /** Unfetched messages the listing under way has found so far. */
     public const string SETTING_BACKFILL_PENDING = 'sync.backfill_pending';
@@ -755,14 +737,6 @@ class Account extends AccountModel
     }
 
     /**
-     * Which provider this account talks to, read off the pair of columns that
-     * actually record it.
-     *
-     * Both stay methods: there is no boolean column here. They answer a
-     * question about $authType and $oauthProvider, which is an interpretation
-     * of two strings rather than the plain read $isActive and $pushEnabled are.
-     */
-    /**
      * Whether this account's mail is read from a POP3 server.
      *
      * The counterpart of isGmail()/isMicrosoft(), and deliberately shaped the
@@ -790,6 +764,14 @@ class Account extends AccountModel
             && false === $this->isPop3();
     }
 
+    /**
+     * Which provider this account talks to, read off the pair of columns that
+     * actually record it.
+     *
+     * Both stay methods: there is no boolean column here. They answer a
+     * question about $authType and $oauthProvider, which is an interpretation
+     * of two strings rather than the plain read $isActive and $pushEnabled are.
+     */
     public function isMicrosoft(): bool
     {
         if (AuthType::OAuth2->value !== $this->authType) {
@@ -1051,72 +1033,26 @@ class Account extends AccountModel
     }
 
     /**
-     * The UIDLs this account has stored, oldest first.
+     * Whether the next POP3 pass should recognise mail this account already
+     * holds, rather than store it again.
      *
-     * A list and not a set because the order is what makes the cap in
-     * $pop3SeenUidls possible; lookup by UIDL is a linear scan of a list
-     * that is bounded and small, and the alternative — a hash keyed by UIDL —
-     * has no stable order to drop from when it fills.
+     * Set by IncomingProtocolSwitch when an IMAP account becomes a POP3 one:
+     * the server's mailbox then is, message for message, mail the account
+     * already has — the IMAP sync fetched it. POP3 has nothing to match those
+     * rows on but the Message-ID, so while this is set a message whose
+     * Message-ID the account already holds is recorded as stored and not
+     * fetched. Cleared once a pass has walked the whole server listing.
      *
-     * Filtered on the way out as well as in: the bag is jsonb, and a value
-     * that is not a list of strings must read as empty rather than reach a
-     * comparison. An empty list is also the correct answer for an account
-     * that has never synced, and means "nothing stored yet" — not "everything
-     * has".
-     *
-     * @var list<string>
+     * Only for that pass, and not as the rule: in normal running a repeated
+     * Message-ID is a second copy that arrived (a mail sent to two of the
+     * user's addresses), and it is stored like any other — see
+     * Pop3AccountSyncer on why recognition is by UIDL.
      */
-    public array $pop3SeenUidls {
-        get {
-            $stored = $this->getSetting(self::SETTING_POP3_SEEN_UIDLS, []);
-
-            if (false === is_array($stored)) {
-                return [];
-            }
-
-            return array_values(array_filter($stored, static fn (mixed $uidl): bool => true === is_string($uidl) && '' !== $uidl));
+    public bool $pop3Adopting {
+        get => true === $this->getSetting(self::SETTING_POP3_ADOPTING, false);
+        set(bool $on) {
+            $this->setSetting(self::SETTING_POP3_ADOPTING, $on ? true : null);
         }
-        set {
-            // Deduplicated and capped from the END: newest last, so what
-            // survives is the recent history, which is what a sync compares
-            // against. array_values() first because array_slice on a list is
-            // the only shape that survives json encoding as a list — a JSON
-            // object with numeric keys would round-trip as one and never read
-            // back as the list this promises.
-            $uidls = array_values(array_unique($value));
-
-            if (count($uidls) > self::POP3_UIDL_MEMORY) {
-                $uidls = array_slice($uidls, -self::POP3_UIDL_MEMORY);
-            }
-
-            $this->setSetting(self::SETTING_POP3_SEEN_UIDLS, $uidls);
-        }
-    }
-
-    /**
-     * Record UIDLs a sync has just stored, keeping the list under the cap.
-     *
-     * The writer a sync uses, so the cap and the deduplication live here and
-     * not in Pop3AccountSyncer. Appending rather than replacing is what lets a
-     * sync that stored ten messages add ten to a list of thousands without
-     * reading them all out and writing them back — though it does read them to
-     * put them back, because a jsonb value is written whole either way.
-     *
-     * @param list<string> $uidls
-     */
-    public function rememberPop3Uidls(array $uidls): void
-    {
-        if ([] === $uidls) {
-            return;
-        }
-
-        $this->pop3SeenUidls = [...$this->pop3SeenUidls, ...$uidls];
-    }
-
-    /** Whether this POP3 account has already stored a message with this UIDL. */
-    public function hasStoredPop3Uidl(string $uidl): bool
-    {
-        return in_array($uidl, $this->pop3SeenUidls, true);
     }
 
     /** Whether a Microsoft account has folders whose history is still to be read. */
