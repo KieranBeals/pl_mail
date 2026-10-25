@@ -252,12 +252,24 @@ final class CardDavDriverTest extends TestCase
         self::assertTrue($fixture->driver->pull(CardDavFixture::book(self::BOOK), 'ctag-7')->resyncRequired);
     }
 
-    public function testWithoutATokenTheFallbackListsEverything(): void
+    /**
+     * RFC 6352 §10.3 puts `filter` in the addressbook-query grammar, and a server
+     * that reads it literally answers a filterless query with an empty 207, which
+     * a full listing then reads as "the address book is empty" (#350). The listing
+     * is a plain Depth-1 PROPFIND instead, with the bodies in one multiget, so
+     * there is no filter to be wrong about.
+     */
+    public function testTheFullListingIsAPropfindAndAMultiget(): void
     {
         $fixture = new CardDavFixture(
             CardDavFixture::collection('/dav/addressbooks/alice/contacts/', syncCollection: false, ctag: 'ctag-8'),
             CardDavFixture::report([
+                '/dav/addressbooks/alice/contacts/ada.vcf' => ['etag' => '"1"', 'vcard' => null],
+                '/dav/addressbooks/alice/contacts/bo.vcf'  => ['etag' => '"2"', 'vcard' => null],
+            ]),
+            CardDavFixture::report([
                 '/dav/addressbooks/alice/contacts/ada.vcf' => ['etag' => '"1"', 'vcard' => CardDavFixture::vcard('ada', 'Ada', 'ada@example.com')],
+                '/dav/addressbooks/alice/contacts/bo.vcf'  => ['etag' => '"2"', 'vcard' => CardDavFixture::vcard('bo', 'Bo', 'bo@example.com')],
             ]),
         );
 
@@ -265,8 +277,103 @@ final class CardDavDriverTest extends TestCase
 
         self::assertTrue($changes->isFullListing);
         self::assertSame('ctag-8', $changes->syncToken, 'the ctag read before the listing');
+        self::assertCount(2, $changes->cards, 'both members of the listing came back, unfiltered');
+        self::assertSame('PROPFIND', $fixture->method(1), 'request 0 is the ctag probe on the collection');
+        self::assertSame('1', $fixture->header(1, 'Depth'));
+        self::assertFalse(str_contains($fixture->body(1), 'address-data'), 'address-data is not a WebDAV property, so a PROPFIND cannot ask for it');
+        self::assertSame('REPORT', $fixture->method(2));
+        self::assertStringContainsString('addressbook-multiget', $fixture->body(2));
+        self::assertSame(3, $fixture->requestCount(), 'the probe, the listing and one multiget, not one GET per card');
+    }
+
+    /**
+     * An address book with a subcollection in it is not a book full of cards:
+     * the collection is not sent to the multiget, and it is not a contact the
+     * mirror should lose.
+     */
+    public function testASubcollectionInTheListingIsNotReadAsAContact(): void
+    {
+        $fixture = new CardDavFixture(
+            CardDavFixture::collection('/dav/addressbooks/alice/contacts/', syncCollection: false, ctag: 'ctag-9'),
+            CalDavFixture::multistatus(<<<'XML'
+                <?xml version="1.0" encoding="utf-8"?>
+                <d:multistatus xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+                  <d:response>
+                    <d:href>/dav/addressbooks/alice/contacts/</d:href>
+                    <d:propstat><d:prop><d:resourcetype><d:collection/><card:addressbook/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                  </d:response>
+                  <d:response>
+                    <d:href>/dav/addressbooks/alice/contacts/archive/</d:href>
+                    <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:getetag>"x"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                  </d:response>
+                  <d:response>
+                    <d:href>/dav/addressbooks/alice/contacts/ada.vcf</d:href>
+                    <d:propstat><d:prop><d:getetag>"1"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                  </d:response>
+                </d:multistatus>
+                XML),
+            CardDavFixture::report([
+                '/dav/addressbooks/alice/contacts/ada.vcf' => ['etag' => '"1"', 'vcard' => CardDavFixture::vcard('ada', 'Ada', 'ada@example.com')],
+            ]),
+        );
+
+        $changes = $fixture->driver->pull(CardDavFixture::book(self::BOOK), null);
+
         self::assertCount(1, $changes->cards);
-        self::assertStringContainsString('addressbook-query', $fixture->body(1));
+        self::assertFalse(str_contains($fixture->body(2), 'archive'), 'the subcollection is not sent to the multiget');
+        self::assertSame(3, $fixture->requestCount(), 'probe, listing, one multiget');
+    }
+
+    /**
+     * A server that caps a listing says so with a 507 on the collection's own href,
+     * the same signal a truncated sync report uses (RFC 6578 §3.6). What arrived is
+     * part of the book, and only a listing that is the whole of it may be read as
+     * "the cards not here are gone".
+     */
+    public function testATruncatedListingIsNotReadAsTheWholeBook(): void
+    {
+        $fixture = new CardDavFixture(
+            CardDavFixture::collection('/dav/addressbooks/alice/contacts/', syncCollection: false, ctag: 'ctag-11'),
+            CalDavFixture::multistatus(<<<'XML'
+                <?xml version="1.0" encoding="utf-8"?>
+                <d:multistatus xmlns:d="DAV:">
+                  <d:response>
+                    <d:href>/dav/addressbooks/alice/contacts/</d:href>
+                    <d:status>HTTP/1.1 507 Insufficient Storage</d:status>
+                    <d:error><d:number-of-matches-within-limits/></d:error>
+                  </d:response>
+                  <d:response>
+                    <d:href>/dav/addressbooks/alice/contacts/ada.vcf</d:href>
+                    <d:propstat><d:prop><d:getetag>"1"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                  </d:response>
+                </d:multistatus>
+                XML),
+            CardDavFixture::report([
+                '/dav/addressbooks/alice/contacts/ada.vcf' => ['etag' => '"1"', 'vcard' => CardDavFixture::vcard('ada', 'Ada', 'ada@example.com')],
+            ]),
+        );
+
+        $changes = $fixture->driver->pull(CardDavFixture::book(self::BOOK), null);
+
+        self::assertFalse($changes->isFullListing, 'a part of the book is not a listing the mirror may delete against');
+        self::assertCount(1, $changes->cards);
+    }
+
+    /**
+     * A Depth-1 PROPFIND always describes the collection it was sent to, so an
+     * answer with no responses at all is a server that did not answer. Reading it
+     * as an empty address book would clear the mirror on an empty body.
+     */
+    public function testAnEmptyAnswerIsNotReadAsAnEmptyAddressBook(): void
+    {
+        $fixture = new CardDavFixture(
+            CardDavFixture::collection('/dav/addressbooks/alice/contacts/', syncCollection: false, ctag: 'ctag-10'),
+            CalDavFixture::multistatus('<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:"></d:multistatus>'),
+        );
+
+        $this->expectException(CalendarSyncPermanentException::class);
+
+        $fixture->driver->pull(CardDavFixture::book(self::BOOK), null);
     }
 
     // ── Writes ────────────────────────────────────────────────────────────────

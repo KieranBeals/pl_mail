@@ -46,7 +46,9 @@ use Psr\Log\LoggerInterface;
  * The calendar driver's rule, for the calendar driver's reason: sync-collection
  * when the server advertises it, because it is the only way to hear about a
  * deletion incrementally; otherwise getctag, and a moved ctag surrenders the
- * token so the next pull is a full listing that *can* express deletions. See
+ * token so the next pull is a full listing that *can* express deletions. That
+ * listing is a Depth-1 PROPFIND and one addressbook-multiget, never an
+ * addressbook-query, for the reason spelled out in pullByCtag. See
  * CalDavCalendarDriver's class docblock for the long version. The failures are
  * CalendarSync* exceptions on purpose — their classes decide retry behaviour,
  * and that decision is the same for a contacts server.
@@ -70,6 +72,22 @@ final readonly class CardDavDriver implements VerifiableDriverInterface, Address
             <d:supported-report-set/>
             <d:sync-token/>
             <cs:getctag/>
+          </d:prop>
+        </d:propfind>
+        XML;
+
+    /**
+     * What the full listing of an address book needs: the etag of every member.
+     * `address-data` is deliberately absent, because it is not a WebDAV property
+     * (RFC 6352 §10.4) and a PROPFIND for it is an error the server must answer
+     * with a 404 propstat. The bodies come back in one addressbook-multiget.
+     */
+    private const string LISTING_PROPS = <<<'XML'
+        <?xml version="1.0" encoding="utf-8"?>
+        <d:propfind xmlns:d="DAV:">
+          <d:prop>
+            <d:getetag/>
+            <d:resourcetype/>
           </d:prop>
         </d:propfind>
         XML;
@@ -312,18 +330,52 @@ final readonly class CardDavDriver implements VerifiableDriverInterface, Address
             return AddressBookChangeSet::resyncRequired();
         }
 
-        $response = $this->client->request($integration, 'REPORT', $collection, [
+        // A PROPFIND, not an addressbook-query. RFC 6352 §10.3 puts `filter` in
+        // the query's grammar, and a server that reads it literally answers a
+        // filterless query with an empty 207 (go-webdav, and everything built on
+        // it, does exactly that: #350). An empty answer to a request this method
+        // is answering as a full listing is a lie the sync service then acts on
+        // by deleting every card in the mirror. Adding a filter would satisfy the
+        // grammar and keep the danger: a prop-filter matches a card only when the
+        // card has the property it names (§10.5.1), so the one contact stored
+        // without an FN would be missing from a listing that claims to be all of
+        // them. A Depth-1 PROPFIND needs no filter to mean "everything here".
+        $response = $this->client->request($integration, 'PROPFIND', $collection, [
             'headers' => [
                 'Depth'        => '1',
                 'Content-Type' => 'application/xml; charset=utf-8',
             ],
-            'body' => $this->queryReportBody(),
+            'body' => self::LISTING_PROPS,
         ], service: DavService::AddressBook);
 
-        $cards = $this->toRemoteCards($integration, $collection, $this->parser->parse($response['body']));
+        $resources = $this->parser->parse($response['body']);
+
+        // A Depth-1 PROPFIND always describes the collection it was sent to, so
+        // an answer with no responses at all is a server that did not answer, not
+        // an address book with nothing in it. Reading it as the latter would
+        // empty the mirror on the strength of an empty body.
+        if ([] === $resources) {
+            throw new CalendarSyncPermanentException(
+                'The contacts server answered the address book listing with nothing at all, not even the address book itself. That is the server, not an empty address book: check the address in the connection settings.',
+            );
+        }
+
+        // A server that caps the listing marks the collection's own href with a
+        // 507, the same signal a truncated sync report uses (RFC 6578 §3.6). What
+        // arrived is part of the book, and `isFullListing` is what tells the sync
+        // service it may delete what the listing did not mention.
+        $isComplete = false === $this->isTruncated($resources);
+
+        if (false === $isComplete) {
+            $this->logger->warning('CardDav: the address book listing came back truncated, so it is not treated as complete', [
+                'collection' => $collection,
+            ]);
+        }
+
+        $cards = $this->toRemoteCards($integration, $collection, $resources);
 
         // The ctag read before the listing — see CalDavCalendarDriver::pullByCtag().
-        return AddressBookChangeSet::of($cards, $ctag, true);
+        return AddressBookChangeSet::of($cards, $ctag, $isComplete);
     }
 
     /**
@@ -339,6 +391,13 @@ final readonly class CardDavDriver implements VerifiableDriverInterface, Address
         $pending = [];
 
         foreach ($resources as $resource) {
+            // A collection inside an address book is not a card, however it got
+            // into the listing: the multiget for it would answer with a 404 propstat
+            // and give no body, so skipping it here also saves that round trip.
+            if (true === $resource->contains('resourcetype', 'collection')) {
+                continue;
+            }
+
             $href = $this->client->absolutise($resource->href, $collection);
 
             if (rtrim($href, '/') === rtrim($collection, '/')) {
@@ -468,18 +527,6 @@ final readonly class CardDavDriver implements VerifiableDriverInterface, Address
             . '</d:sync-collection>',
             htmlspecialchars($token ?? '', ENT_XML1),
         );
-    }
-
-    /**
-     * Every card, unfiltered — a filter would make the listing a lie the sync
-     * service then acts on by deleting what it did not mention.
-     */
-    private function queryReportBody(): string
-    {
-        return '<?xml version="1.0" encoding="utf-8"?>'
-            . '<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">'
-            . '<d:prop><d:getetag/><card:address-data/></d:prop>'
-            . '</card:addressbook-query>';
     }
 
     // ── One collection ────────────────────────────────────────────────────────
